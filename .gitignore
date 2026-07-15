@@ -1,0 +1,7 @@
+.env
+.venv/
+.mcp_token_cache.json
+__pycache__/
+*.pyc
+.claude/
+.ipynb_checkpoints/
