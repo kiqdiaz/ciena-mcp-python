@@ -31,3 +31,10 @@ class NSIService:
             "/nsi/api/v7/fres",
             params={"networkConstruct.id": network_construct_id},
         )
+
+    def tpes(self, network_construct_id):
+        """Termination points de un NE (nativeName, p.ej. PTP-1-3-1, usable como --facility en --metrics)."""
+        return self._get_all_pages(
+            "/nsi/api/v7/tpes",
+            params={"networkConstruct.id": network_construct_id},
+        )
