@@ -28,7 +28,7 @@ class MCPClient:
         )
 
     def request(self, method, path, retry_on_401=True, **kwargs):
-        url = f"{self.base_url}{path}"
+        url = path if path.startswith("http") else f"{self.base_url}{path}"
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {self.auth.get_token()}"
 
