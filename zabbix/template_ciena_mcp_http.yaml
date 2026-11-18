@@ -1,0 +1,1274 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: d87cea83e5a5402ba1a52ee407cb9160
+      name: Templates/Network devices
+  host_groups:
+    - uuid: 03f4b5d6ecdf4a4f8561021ebf34ea12
+      name: 'Ciena/Network elements'
+  templates:
+    - uuid: 433a53d035ab46f4a438524056ca3c0a
+      template: 'Ciena MCP NE by HTTP'
+      name: 'Ciena MCP NE by HTTP'
+      description: |
+        Network Element (NE) de Ciena monitoreado a través de la API REST del Ciena MCP.
+
+        No se vincula a mano: lo vinculan los host prototypes del template "Ciena MCP by HTTP",
+        que crean un host por cada network construct y le fijan {$CIENA.NE.ID} y {$CIENA.NE.NAME}.
+
+        Usa {$CIENA.MCP.URL} y {$CIENA.MCP.TOKEN}, globales o heredadas del host MCP (ver zabbix/README.md).
+
+        Recolecta:
+        - Estado del NE (sync/asociación con el MCP) e inventario de host (SW, serie, modelo, sitio, coordenadas).
+        - Inventario de equipment (tarjetas/módulos): estado, número de serie, part number y tipo.
+        - Performance metrics (PM) del último bin, filtrables con {$CIENA.PM.FILTER}.
+      vendor:
+        name: Ciena
+        version: 7.0-1
+      groups:
+        - name: Templates/Network devices
+      items:
+        - uuid: 2e7d2cc66e00407ebfeeaa0ed0b832e5
+          name: 'NE: Get network construct'
+          type: HTTP_AGENT
+          key: ciena.ne.get
+          delay: '{$CIENA.NE.STATUS.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'Atributos del network construct de este NE (/nsi/api/v7/networkConstructs?name=...).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.data[?(@.id == ''{$CIENA.NE.ID}'')].attributes.first()'
+          timeout: '{$CIENA.MCP.HTTP.TIMEOUT}'
+          url: '{$CIENA.MCP.URL}/nsi/api/v7/networkConstructs'
+          query_fields:
+            - name: name
+              value: '{$CIENA.NE.NAME}'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$CIENA.MCP.TOKEN}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 180c82396177488c84357182ecbd2bb4
+          name: 'NE: Association state'
+          type: DEPENDENT
+          key: ciena.ne.association_state
+          history: 30d
+          value_type: CHAR
+          description: 'Estado de la conexión MCP <-> NE (displayAssociationState). "Connected" = el MCP está gestionando el NE.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.displayData.displayAssociationState
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: status
+          triggers:
+            - uuid: 085484d4e4f5428cbab7f257f3c0d57c
+              expression: 'last(/Ciena MCP NE by HTTP/ciena.ne.association_state)<>"Connected"'
+              name: 'NE {HOST.NAME}: not connected to MCP'
+              event_name: 'NE {HOST.NAME}: not connected to MCP (state: {ITEM.LASTVALUE})'
+              priority: HIGH
+              description: 'El MCP perdió la asociación con el NE: el equipo no responde o la sesión de gestión cayó.'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 30c6e9aa3b1b4db18904e212a9d47711
+              expression: 'nodata(/Ciena MCP NE by HTTP/ciena.ne.association_state,{$CIENA.NE.NODATA.TIMEOUT})=1'
+              name: 'NE {HOST.NAME}: no data from MCP API'
+              priority: WARNING
+              description: 'No se reciben datos del NE desde el MCP. Revisar el item "NE: Get network construct" (token, URL, o el NE ya no existe en el MCP).'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: b7f9d63af0d84ea0bbb6afc5a831809a
+          name: 'NE: Sync state'
+          type: DEPENDENT
+          key: ciena.ne.sync_state
+          history: 30d
+          value_type: CHAR
+          description: 'Estado de sincronización del inventario del NE en el MCP (synchronized, synchronizing, pending, failed, ...).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.displayData.displaySyncState
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: status
+          triggers:
+            - uuid: 43a7f4f7180b47bb900ce2734907b87f
+              expression: 'last(/Ciena MCP NE by HTTP/ciena.ne.sync_state)<>"synchronized" and count(/Ciena MCP NE by HTTP/ciena.ne.sync_state,{$CIENA.NE.SYNC.TIMEOUT},"eq","synchronized")=0'
+              name: 'NE {HOST.NAME}: not synchronized for {$CIENA.NE.SYNC.TIMEOUT}'
+              event_name: 'NE {HOST.NAME}: not synchronized for {$CIENA.NE.SYNC.TIMEOUT} (state: {ITEM.LASTVALUE})'
+              priority: WARNING
+              dependencies:
+                - name: 'NE {HOST.NAME}: not connected to MCP'
+                  expression: 'last(/Ciena MCP NE by HTTP/ciena.ne.association_state)<>"Connected"'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: d82c149fd7d2422485ccc6ee6e4c01db
+          name: 'NE: Inventory out of sync'
+          type: DEPENDENT
+          key: ciena.ne.inventory_out_of_sync
+          history: 30d
+          description: 'inventoryOutOfSync: el inventario del MCP no coincide con el NE.'
+          valuemap:
+            name: 'Ciena boolean'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.inventoryOutOfSync
+            - type: BOOL_TO_DECIMAL
+              parameters:
+                - ''
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: status
+          triggers:
+            - uuid: ad7e472c37ec415dbeaffaa2ec5f1cd1
+              expression: 'last(/Ciena MCP NE by HTTP/ciena.ne.inventory_out_of_sync)=1'
+              name: 'NE {HOST.NAME}: MCP inventory out of sync'
+              priority: INFO
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: d2ae6eda91674a7a8c69342e43851dca
+          name: 'NE: IP address'
+          type: DEPENDENT
+          key: ciena.ne.ip
+          history: 30d
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.ipAddress
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: b9c7314cbf5442009df700fd0c08c416
+          name: 'NE: Software version'
+          type: DEPENDENT
+          key: ciena.ne.software_version
+          history: 90d
+          value_type: CHAR
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.softwareVersion
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+          triggers:
+            - uuid: 306b62c3813e4bc2ad339b449ee3cd73
+              expression: 'change(/Ciena MCP NE by HTTP/ciena.ne.software_version)=1'
+              name: 'NE {HOST.NAME}: software version changed'
+              event_name: 'NE {HOST.NAME}: software version changed (new: {ITEM.LASTVALUE})'
+              priority: INFO
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: 9e569e12635f495781e3c5771745ea97
+          name: 'NE: Software release (native)'
+          type: DEPENDENT
+          key: ciena.ne.software_native
+          history: 90d
+          value_type: CHAR
+          inventory_link: SOFTWARE_FULL
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.nativeSoftwareVersion
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: f276d8b1a693430a92880a51045d3666
+          name: 'NE: Serial number'
+          type: DEPENDENT
+          key: ciena.ne.serial_number
+          history: 90d
+          value_type: CHAR
+          inventory_link: SERIALNO_A
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.serialNumber
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: 1ab1db4aeb93474ca65e7e50b31a39b7
+          name: 'NE: Device type'
+          type: DEPENDENT
+          key: ciena.ne.device_type
+          history: 90d
+          value_type: CHAR
+          inventory_link: MODEL
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.deviceType
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: 256d900477bb4203b5082e68a3baf32b
+          name: 'NE: Device version'
+          type: DEPENDENT
+          key: ciena.ne.device_version
+          history: 90d
+          value_type: CHAR
+          inventory_link: HARDWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.deviceVersion
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: b97d880cd453451b984458efe4cded96
+          name: 'NE: Function'
+          type: DEPENDENT
+          key: ciena.ne.function
+          history: 90d
+          value_type: CHAR
+          inventory_link: TYPE
+          description: 'memberFunction del NE (ROADM, ILA, ...).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.memberFunction
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: e3c6a55be5924a9ea290c2ae2d208a4f
+          name: 'NE: Vendor'
+          type: DEPENDENT
+          key: ciena.ne.vendor
+          history: 90d
+          value_type: CHAR
+          inventory_link: VENDOR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.vendor
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: 0401361e4a414d15a67a322812cced5a
+          name: 'NE: MAC address'
+          type: DEPENDENT
+          key: ciena.ne.mac_address
+          history: 90d
+          value_type: CHAR
+          inventory_link: MACADDRESS_A
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.macAddress
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: b71bf52a35b146d2a42a0c8c0a1a13b6
+          name: 'NE: Site'
+          type: DEPENDENT
+          key: ciena.ne.site
+          history: 90d
+          value_type: CHAR
+          inventory_link: LOCATION
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.siteName
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: 0b63baf61f2240c787b604c57c46004a
+          name: 'NE: Latitude'
+          type: DEPENDENT
+          key: ciena.ne.latitude
+          history: 90d
+          value_type: CHAR
+          inventory_link: LOCATION_LAT
+          description: 'Tomado de userData.latitudeLongitudeString ("lat,lon"). Alimenta el inventario de host para el widget Geomap.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.userData.latitudeLongitudeString
+              error_handler: DISCARD_VALUE
+            - type: REGEX
+              parameters:
+                - '^\s*(-?[0-9.]+)\s*,'
+                - \1
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: 09c24fe7ac8f449e89c6f08a650a5ca9
+          name: 'NE: Longitude'
+          type: DEPENDENT
+          key: ciena.ne.longitude
+          history: 90d
+          value_type: CHAR
+          inventory_link: LOCATION_LON
+          description: 'Tomado de userData.latitudeLongitudeString ("lat,lon"). Alimenta el inventario de host para el widget Geomap.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.userData.latitudeLongitudeString
+              error_handler: DISCARD_VALUE
+            - type: REGEX
+              parameters:
+                - ',\s*(-?[0-9.]+)\s*$'
+                - \1
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: 6b173f364bb4425dbf00edde663e0e5c
+          name: 'NE: Number of shelves'
+          type: DEPENDENT
+          key: ciena.ne.shelves
+          history: 90d
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.numberOfShelves
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: ciena.ne.get
+          tags:
+            - tag: component
+              value: inventory
+        - uuid: 6a90a5173bb7472b930a83c7c1ca07c7
+          name: 'Equipment: Get list'
+          type: HTTP_AGENT
+          key: ciena.ne.equipment.get
+          delay: '{$CIENA.EQPT.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'Equipment (shelves, tarjetas, pluggables) del NE, compactado a {id: {name, state, serial, ...}}.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var r = JSON.parse(value), out = {};
+                  (r.data || []).forEach(function (e) {
+                      var a = e.attributes || {}, s = a.installedSpec || {}, d = a.displayData || {};
+                      var id = String(e.id).split('::').pop();
+                      var name = d.displayName || a.nativeName || '';
+                      if (!name || name.charAt(0) === '-') {
+                          name = (a.cardType || 'EQPT') + (name || '-' + id);
+                      }
+                      out[id] = {
+                          name: name,
+                          cardType: a.cardType || '',
+                          state: a.state || '',
+                          serial: s.serialNumber || '',
+                          partNumber: s.partNumber || '',
+                          type: s.type || '',
+                          mismatch: a.specificationMismatch === true
+                      };
+                  });
+                  return JSON.stringify(out);
+          timeout: '{$CIENA.MCP.HTTP.TIMEOUT}'
+          url: '{$CIENA.MCP.URL}/nsi/api/v7/equipment'
+          query_fields:
+            - name: networkConstruct.id
+              value: '{$CIENA.NE.ID}'
+            - name: limit
+              value: '1000'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$CIENA.MCP.TOKEN}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 2d661e76a814436eb1d735319e23e7fc
+          name: 'Equipment: Total'
+          type: DEPENDENT
+          key: ciena.ne.equipment.count
+          history: 90d
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - 'return Object.keys(JSON.parse(value)).length;'
+          master_item:
+            key: ciena.ne.equipment.get
+          tags:
+            - tag: component
+              value: equipment
+          triggers:
+            - uuid: 14b4d0ed129049ed83b6dcd391b2f49e
+              expression: 'change(/Ciena MCP NE by HTTP/ciena.ne.equipment.count)<0'
+              name: 'NE {HOST.NAME}: equipment removed'
+              event_name: 'NE {HOST.NAME}: equipment removed (now {ITEM.LASTVALUE})'
+              priority: WARNING
+              description: 'Bajó la cantidad de equipment reportado por el MCP: se retiró una tarjeta o pluggable.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: e308d7fe51fd4f1dbe8922bc0ad986a4
+          name: 'Equipment: Not in service'
+          type: DEPENDENT
+          key: ciena.ne.equipment.not_in_service
+          history: 90d
+          description: 'Cantidad de equipment con estado distinto de IS (los pasivos sin estado no cuentan).'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var eq = JSON.parse(value), n = 0;
+                  Object.keys(eq).forEach(function (k) {
+                      if (eq[k].state !== '' && eq[k].state !== 'IS') {
+                          n++;
+                      }
+                  });
+                  return n;
+          master_item:
+            key: ciena.ne.equipment.get
+          tags:
+            - tag: component
+              value: equipment
+        - uuid: 46ab39dd34aa41eebdee5ec0fc0d6112
+          name: 'Equipment: Specification mismatch'
+          type: DEPENDENT
+          key: ciena.ne.equipment.mismatch
+          history: 90d
+          description: 'Cantidad de equipment cuyo hardware instalado no coincide con el provisionado.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var eq = JSON.parse(value), n = 0;
+                  Object.keys(eq).forEach(function (k) {
+                      if (eq[k].mismatch) {
+                          n++;
+                      }
+                  });
+                  return n;
+          master_item:
+            key: ciena.ne.equipment.get
+          tags:
+            - tag: component
+              value: equipment
+          triggers:
+            - uuid: e4acf62d9f6944e0ab8827b8fd0b5ecd
+              expression: 'last(/Ciena MCP NE by HTTP/ciena.ne.equipment.mismatch)>0'
+              name: 'NE {HOST.NAME}: equipment specification mismatch'
+              event_name: 'NE {HOST.NAME}: {ITEM.LASTVALUE} equipment with specification mismatch'
+              priority: WARNING
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: b122ac94e537450ab34f54d37b0b3b4b
+          name: 'PM: Get metrics'
+          type: HTTP_AGENT
+          key: ciena.ne.pm.get
+          delay: '{$CIENA.PM.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: |
+            POST /pm/api/v3/query/metrics para este NE con el filtro {$CIENA.PM.FILTER}.
+            Se queda solo con la última muestra de cada serie: {"facility|parameter|location|direction": {value, condition, unit, ts}}.
+            Las muestras con condition OOR (out of range, p.ej. -99 dBm sin señal) se guardan sin "value".
+            Por cada serie PREFEC_BER / PREFEC_BER_MAX agrega una serie calculada Q_FROM_<parámetro> (dBQ):
+            Q = 20·log10(√2·erfcinv(2·BER)), el mismo Q que reporta la tarjeta en QUALITY_FACTOR_*.
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  // Inversa de la normal estándar (algoritmo de Acklam, error relativo < 1.2e-9).
+                  function normInv(p) {
+                      var a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+                               1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
+                      var b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+                               6.680131188771972e+01, -1.328068155288572e+01];
+                      var c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+                               -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
+                      var d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+                               3.754408661907416e+00];
+                      var q, r;
+                      if (p < 0.02425) {
+                          q = Math.sqrt(-2 * Math.log(p));
+                          return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+                              ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+                      }
+                      q = p - 0.5;
+                      r = q * q;
+                      return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+                          (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+                  }
+
+                  // BER = 0.5·erfc(Q/√2)  =>  Q = -normInv(BER). Sin Q finito para BER = 0 (sin errores) o >= 0.5.
+                  function qFromBer(ber) {
+                      if (typeof ber !== 'number' || ber <= 0 || ber >= 0.5) {
+                          return null;
+                      }
+                      return Math.round(20 * Math.log(-normInv(ber)) / Math.LN10 * 100) / 100;
+                  }
+
+                  var BER_PARAMS = {PREFEC_BER: true, PREFEC_BER_MAX: true};
+                  var r = JSON.parse(value), out = {};
+
+                  function add(row, val) {
+                      if (row.condition !== 'OOR' && val !== null && val !== undefined) {
+                          row.value = val;
+                      }
+                      out[[row.facility, row.parameter, row.location, row.direction].join('|')] = row;
+                  }
+
+                  (r.data || []).forEach(function (s) {
+                      var a = s.attributes || {}, t = a.tags || {}, v = a.values || {};
+                      var ts = Object.keys(v).sort();
+                      if (!t.facilityNameNative || !t.parameter || ts.length === 0) {
+                          return;
+                      }
+                      var last = v[ts[ts.length - 1]];
+                      var row = {
+                          facility: t.facilityNameNative,
+                          parameter: t.parameter,
+                          location: t.location || '',
+                          direction: t.direction || '',
+                          unit: t.unit || '',
+                          condition: last.condition || '',
+                          ts: ts[ts.length - 1]
+                      };
+                      add(row, last.value);
+
+                      if (BER_PARAMS[t.parameter]) {
+                          var q = JSON.parse(JSON.stringify(row));
+                          q.parameter = 'Q_FROM_' + t.parameter;
+                          q.unit = 'dBQ';
+                          delete q.value;
+                          add(q, qFromBer(last.value));
+                      }
+                  });
+                  return JSON.stringify(out);
+          timeout: '{$CIENA.MCP.HTTP.TIMEOUT}'
+          url: '{$CIENA.MCP.URL}/pm/api/v3/query/metrics'
+          query_fields:
+            - name: ts
+              value: rfc3339
+          posts: '{"data":{"type":"queryMetrics","attributes":{"range":{"type":"relative","unit":"HOURS","value":1},"pageSize":5000,"filter":["and",["=","networkElementName","{$CIENA.NE.NAME}"],["=","granularity","{$CIENA.PM.GRANULARITY}"],{$CIENA.PM.FILTER}]}}}'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$CIENA.MCP.TOKEN}'
+            - name: Content-Type
+              value: application/json
+            - name: Accept
+              value: application/json
+          status_codes: '200,201'
+          request_method: POST
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 749ac81b7ca54a13b2fdceb69d5296e3
+          name: 'PM: Series received'
+          type: DEPENDENT
+          key: ciena.ne.pm.series
+          history: 30d
+          description: 'Cantidad de series PM devueltas por el MCP para este NE en la última consulta.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - 'return Object.keys(JSON.parse(value)).length;'
+          master_item:
+            key: ciena.ne.pm.get
+          tags:
+            - tag: component
+              value: pm
+      discovery_rules:
+        - uuid: 066f7dd9733e456fbefea78ecd12139a
+          name: 'Equipment discovery'
+          type: DEPENDENT
+          key: ciena.ne.equipment.discovery
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#EQ.NAME}'
+                value: '{$CIENA.EQPT.NAME.MATCHES}'
+                formulaid: A
+              - macro: '{#EQ.NAME}'
+                value: '{$CIENA.EQPT.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+          description: 'Un set de items por cada equipment (tarjeta, shelf, pluggable, fan, ...) del NE.'
+          item_prototypes:
+            - uuid: 2741ddb075614dc39f3bb6c11e6a21e0
+              name: 'Equipment {#EQ.NAME}: State'
+              type: DEPENDENT
+              key: 'ciena.eq.state[{#EQ.ID}]'
+              history: 30d
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[''{#EQ.ID}''].state'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: ciena.ne.equipment.get
+              tags:
+                - tag: component
+                  value: equipment
+                - tag: equipment
+                  value: '{#EQ.NAME}'
+              trigger_prototypes:
+                - uuid: 2f879d1ffa8345e99aa8978c16ddabf8
+                  expression: 'find(/Ciena MCP NE by HTTP/ciena.eq.state[{#EQ.ID}],,"regexp","{$CIENA.EQPT.STATE.OK.MATCHES}")=0'
+                  name: 'NE {HOST.NAME}: {#EQ.NAME} not in service'
+                  event_name: 'NE {HOST.NAME}: {#EQ.NAME} not in service (state: {ITEM.LASTVALUE})'
+                  priority: WARNING
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: 009b2d0b15c744b7827dc64d61b2ce38
+              name: 'Equipment {#EQ.NAME}: Serial number'
+              type: DEPENDENT
+              key: 'ciena.eq.serial[{#EQ.ID}]'
+              history: 90d
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[''{#EQ.ID}''].serial'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: ciena.ne.equipment.get
+              tags:
+                - tag: component
+                  value: equipment
+                - tag: equipment
+                  value: '{#EQ.NAME}'
+              trigger_prototypes:
+                - uuid: 6cd6512c01ae4929a97000697f8d4941
+                  expression: 'change(/Ciena MCP NE by HTTP/ciena.eq.serial[{#EQ.ID}])=1'
+                  name: 'NE {HOST.NAME}: {#EQ.NAME} replaced'
+                  event_name: 'NE {HOST.NAME}: {#EQ.NAME} replaced (new serial: {ITEM.LASTVALUE})'
+                  priority: INFO
+                  description: 'Cambió el número de serie: se reemplazó la tarjeta/módulo.'
+                  manual_close: 'YES'
+                  tags:
+                    - tag: scope
+                      value: notice
+            - uuid: f709cf80257e4cde80f06db4214803a9
+              name: 'Equipment {#EQ.NAME}: Part number'
+              type: DEPENDENT
+              key: 'ciena.eq.part_number[{#EQ.ID}]'
+              history: 90d
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[''{#EQ.ID}''].partNumber'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: ciena.ne.equipment.get
+              tags:
+                - tag: component
+                  value: equipment
+                - tag: equipment
+                  value: '{#EQ.NAME}'
+            - uuid: 19208140c696451c9061b06bb801351f
+              name: 'Equipment {#EQ.NAME}: Type'
+              type: DEPENDENT
+              key: 'ciena.eq.type[{#EQ.ID}]'
+              history: 90d
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[''{#EQ.ID}''].type'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: ciena.ne.equipment.get
+              tags:
+                - tag: component
+                  value: equipment
+                - tag: equipment
+                  value: '{#EQ.NAME}'
+          master_item:
+            key: ciena.ne.equipment.get
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var eq = JSON.parse(value);
+                  return JSON.stringify(Object.keys(eq).map(function (id) {
+                      return {
+                          '{#EQ.ID}': id,
+                          '{#EQ.NAME}': eq[id].name,
+                          '{#EQ.CARDTYPE}': eq[id].cardType
+                      };
+                  }));
+        - uuid: 487e17f573cd43cb9b466b1f54140330
+          name: 'PM series discovery'
+          type: DEPENDENT
+          key: ciena.ne.pm.discovery
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#FACILITY}'
+                value: '{$CIENA.PM.FACILITY.MATCHES}'
+                formulaid: A
+              - macro: '{#FACILITY}'
+                value: '{$CIENA.PM.FACILITY.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+              - macro: '{#CONDITION}'
+                value: '{$CIENA.PM.CONDITION.DISCOVER.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: C
+          description: |
+            Una serie por facility + parameter + location + direction devuelta por el query PM.
+            Por defecto no se descubren las series que están en OOR al momento del descubrimiento
+            (puertos sin uso, -99 dBm); si un puerto ya descubierto pasa a OOR, se dispara el trigger de condition.
+          item_prototypes:
+            - uuid: d2fa728acc9a40a9b053c20fa951a032
+              name: '{#FACILITY}: {#PARAM} ({#LOCATION} {#DIRECTION})'
+              type: DEPENDENT
+              key: 'ciena.pm.value["{#FACILITY}","{#PARAM}","{#LOCATION}","{#DIRECTION}"]'
+              history: 30d
+              value_type: FLOAT
+              units: '{#UNIT}'
+              description: 'Último bin {$CIENA.PM.GRANULARITY} del parámetro PM. Sin valor mientras la condition sea OOR.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[''{#PM.ID}''].value'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: ciena.ne.pm.get
+              tags:
+                - tag: component
+                  value: pm
+                - tag: facility
+                  value: '{#FACILITY}'
+                - tag: parameter
+                  value: '{#PARAM}'
+              trigger_prototypes:
+                - uuid: 7d628e5ef5584ff1b52b1f4cb5253c43
+                  expression: 'last(/Ciena MCP NE by HTTP/ciena.pm.value["{#FACILITY}","{#PARAM}","{#LOCATION}","{#DIRECTION}"])<{$CIENA.PM.LOW:"{#PARAM}:{#FACILITY}"}'
+                  name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} below threshold'
+                  event_name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} below {$CIENA.PM.LOW:"{#PARAM}:{#FACILITY}"} (now {ITEM.LASTVALUE})'
+                  priority: WARNING
+                  description: 'Umbral por macro con contexto "PARAMETRO:FACILITY", p.ej. {$CIENA.PM.LOW:"RX_OPTICAL_POWER:PTP-1-3-1"} o {$CIENA.PM.LOW:regex:"^RX_OPTICAL_POWER:"}.'
+                  tags:
+                    - tag: scope
+                      value: performance
+                - uuid: 19a913d5e8934003aa1ccc3724874413
+                  expression: 'last(/Ciena MCP NE by HTTP/ciena.pm.value["{#FACILITY}","{#PARAM}","{#LOCATION}","{#DIRECTION}"])>{$CIENA.PM.HIGH:"{#PARAM}:{#FACILITY}"}'
+                  name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} above threshold'
+                  event_name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} above {$CIENA.PM.HIGH:"{#PARAM}:{#FACILITY}"} (now {ITEM.LASTVALUE})'
+                  priority: WARNING
+                  description: 'Umbral por macro con contexto "PARAMETRO:FACILITY", p.ej. {$CIENA.PM.HIGH:"TX_OPTICAL_POWER:PTP-1-3-1"}.'
+                  tags:
+                    - tag: scope
+                      value: performance
+                - uuid: b9dcb73e39714c0e805eb3b2bc59e51d
+                  expression: 'abs(last(/Ciena MCP NE by HTTP/ciena.pm.value["{#FACILITY}","{#PARAM}","{#LOCATION}","{#DIRECTION}"])-avg(/Ciena MCP NE by HTTP/ciena.pm.value["{#FACILITY}","{#PARAM}","{#LOCATION}","{#DIRECTION}"],{$CIENA.PM.BASELINE.PERIOD}))>{$CIENA.PM.DELTA.MAX:"{#PARAM}:{#FACILITY}"}'
+                  name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} deviates from baseline'
+                  event_name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} deviates more than {$CIENA.PM.DELTA.MAX:"{#PARAM}:{#FACILITY}"} {#UNIT} from its {$CIENA.PM.BASELINE.PERIOD} average (now {ITEM.LASTVALUE})'
+                  priority: WARNING
+                  description: 'Degradación: el último valor se aleja más de {$CIENA.PM.DELTA.MAX} del promedio de {$CIENA.PM.BASELINE.PERIOD}. Por defecto activo solo para RX/TX_OPTICAL_POWER (3 dB) y factor Q (1 dBQ).'
+                  tags:
+                    - tag: scope
+                      value: performance
+            - uuid: 77806a840d4a48509c00843420609eaa
+              name: '{#FACILITY}: {#PARAM} ({#LOCATION} {#DIRECTION}) condition'
+              type: DEPENDENT
+              key: 'ciena.pm.condition["{#FACILITY}","{#PARAM}","{#LOCATION}","{#DIRECTION}"]'
+              history: 30d
+              value_type: CHAR
+              description: 'Condition del último bin PM (OK, OOR, N/A, ...).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[''{#PM.ID}''].condition'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: ciena.ne.pm.get
+              tags:
+                - tag: component
+                  value: pm
+                - tag: facility
+                  value: '{#FACILITY}'
+                - tag: parameter
+                  value: '{#PARAM}'
+              trigger_prototypes:
+                - uuid: 6d14970f3aa74651b9d6aca258159fdd
+                  expression: 'find(/Ciena MCP NE by HTTP/ciena.pm.condition["{#FACILITY}","{#PARAM}","{#LOCATION}","{#DIRECTION}"],,"regexp","{$CIENA.PM.CONDITION.ALERT.MATCHES:\"{#PARAM}\"}")=1'
+                  name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} out of range'
+                  event_name: 'NE {HOST.NAME}: {#FACILITY} {#PARAM} condition {ITEM.LASTVALUE}'
+                  priority: AVERAGE
+                  description: 'La facility estaba operativa al descubrirse y ahora reporta OOR (p.ej. pérdida de señal óptica).'
+                  tags:
+                    - tag: scope
+                      value: performance
+          master_item:
+            key: ciena.ne.pm.get
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var pm = JSON.parse(value);
+                  return JSON.stringify(Object.keys(pm).map(function (id) {
+                      var s = pm[id];
+                      return {
+                          '{#PM.ID}': id,
+                          '{#FACILITY}': s.facility,
+                          '{#PARAM}': s.parameter,
+                          '{#LOCATION}': s.location,
+                          '{#DIRECTION}': s.direction,
+                          '{#UNIT}': s.unit,
+                          '{#CONDITION}': s.condition
+                      };
+                  }));
+      tags:
+        - tag: class
+          value: network
+        - tag: target
+          value: ciena
+      macros:
+        - macro: '{$CIENA.EQPT.INTERVAL}'
+          value: 1h
+          description: 'Intervalo de consulta del inventario de equipment.'
+        - macro: '{$CIENA.EQPT.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex: equipment a descubrir (por nombre, p.ej. TRM-1-5).'
+        - macro: '{$CIENA.EQPT.NAME.NOT_MATCHES}'
+          value: '^FILLER'
+          description: 'Regex: equipment a excluir del descubrimiento.'
+        - macro: '{$CIENA.EQPT.STATE.OK.MATCHES}'
+          value: '^(IS|)$'
+          description: 'Regex de estados de equipment considerados OK (vacío = pasivo sin estado).'
+        - macro: '{$CIENA.MCP.HTTP.TIMEOUT}'
+          value: 30s
+          description: 'Timeout de las llamadas HTTP al MCP.'
+        - macro: '{$CIENA.NE.ID}'
+          description: 'Id del network construct. Lo fija el host prototype; no editar.'
+        - macro: '{$CIENA.NE.NAME}'
+          description: 'Nombre del NE (networkElementName en PM). Lo fija el host prototype; no editar.'
+        - macro: '{$CIENA.NE.NODATA.TIMEOUT}'
+          value: 30m
+          description: 'Tiempo sin datos del NE antes de alertar.'
+        - macro: '{$CIENA.NE.STATUS.INTERVAL}'
+          value: 5m
+          description: 'Intervalo de consulta del estado/inventario del NE.'
+        - macro: '{$CIENA.NE.SYNC.TIMEOUT}'
+          value: 30m
+          description: 'Tiempo continuo sin estado synchronized antes de alertar.'
+        - macro: '{$CIENA.PM.BASELINE.PERIOD}'
+          value: 1d
+          description: 'Ventana del promedio usado como línea base en el trigger de desviación.'
+        - macro: '{$CIENA.PM.CONDITION.ALERT.MATCHES}'
+          value: '^OOR$'
+          description: 'Regex de conditions PM que disparan alerta. Admite contexto por parámetro, p.ej. {$CIENA.PM.CONDITION.ALERT.MATCHES:"RX_OPTICAL_POWER"}.'
+        - macro: '{$CIENA.PM.CONDITION.DISCOVER.NOT_MATCHES}'
+          value: '^OOR$'
+          description: 'Regex: no descubrir series cuya condition actual coincida (puertos sin señal / sin uso).'
+        - macro: '{$CIENA.PM.DELTA.MAX}'
+          value: '1000000'
+          description: 'Desviación máxima respecto de la línea base. Default: deshabilitado.'
+        - macro: '{$CIENA.PM.DELTA.MAX:regex:"^(RX|TX)_OPTICAL_POWER:"}'
+          value: '3'
+          description: 'Desviación máxima (dB) para potencia óptica RX/TX.'
+        - macro: '{$CIENA.PM.DELTA.MAX:regex:"^(QUALITY_FACTOR_AVG|Q_FROM_PREFEC_BER):"}'
+          value: '1'
+          description: 'Desviación máxima (dBQ) del factor Q respecto de su línea base.'
+        - macro: '{$CIENA.PM.FACILITY.MATCHES}'
+          value: '.*'
+          description: 'Regex: facilities a descubrir, p.ej. ^PTP- para solo puertos físicos.'
+        - macro: '{$CIENA.PM.FACILITY.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Regex: facilities a excluir.'
+        - macro: '{$CIENA.PM.FILTER}'
+          value: '["or",["=","parameter","RX_OPTICAL_POWER"],["=","parameter","TX_OPTICAL_POWER"],["=","parameter","QUALITY_FACTOR_AVG"],["=","parameter","QUALITY_FACTOR_MIN"],["=","parameter","PREFEC_BER"]]'
+          description: 'Condición JSON (sintaxis de filtro PM del MCP) que se agrega al query. PREFEC_BER genera además la serie calculada Q_FROM_PREFEC_BER. Ej. para sumar errores, agregar ,["=","parameter","ERRORED_SECONDS"] dentro del "or".'
+        - macro: '{$CIENA.PM.GRANULARITY}'
+          value: 15_MINUTE
+          description: 'Granularidad de los bins PM a consultar.'
+        - macro: '{$CIENA.PM.HIGH}'
+          value: '1000000'
+          description: 'Umbral superior PM. Contexto "PARAMETRO:FACILITY". Default: deshabilitado.'
+        - macro: '{$CIENA.PM.INTERVAL}'
+          value: 15m
+          description: 'Intervalo de consulta PM (coincidir con la granularidad).'
+        - macro: '{$CIENA.PM.LOW}'
+          value: '-1000000'
+          description: 'Umbral inferior PM. Contexto "PARAMETRO:FACILITY", p.ej. {$CIENA.PM.LOW:regex:"^RX_OPTICAL_POWER:PTP-"} = -18. Default: deshabilitado.'
+      valuemaps:
+        - uuid: cbf281f0bacd458799f74c8d7d10cc15
+          name: 'Ciena boolean'
+          mappings:
+            - value: '0'
+              newvalue: 'No'
+            - value: '1'
+              newvalue: 'Yes'
+    - uuid: 9fd218541b114259b86e0d92a9e87136
+      template: 'Ciena MCP by HTTP'
+      name: 'Ciena MCP by HTTP'
+      description: |
+        Ciena MCP (Manage, Control and Plan) vía API REST con Bearer token.
+
+        Vincular a un host que represente al MCP. Requiere dos macros, globales (recomendado)
+        o en el host MCP:
+        - {$CIENA.MCP.URL}: p.ej. https://10.0.0.1 (sin "/" final)
+        - {$CIENA.MCP.TOKEN}: token de /tron/api/v1/tokens (tipo Secret text)
+        Si se definen en el host MCP, los hosts NE descubiertos las heredan, pero un cambio
+        de token les llega recién en la siguiente corrida del LLD (hasta 1h).
+
+        - Chequea que la API responda y que el token sea válido.
+        - Cuenta network constructs y su estado.
+        - Descubre cada network construct como un host vinculado a "Ciena MCP NE by HTTP".
+
+        Ver zabbix/README.md para generar/renovar el token automáticamente.
+      vendor:
+        name: Ciena
+        version: 7.0-1
+      groups:
+        - name: Templates/Network devices
+      items:
+        - uuid: f6971342c0864f49a5ac28901e8956d7
+          name: 'MCP: API HTTP status'
+          type: HTTP_AGENT
+          key: ciena.mcp.api.status
+          delay: 1m
+          history: 30d
+          description: 'Código HTTP de GET /tron/api/v1/current-user con el token configurado. 200 = OK, 401 = token inválido/expirado.'
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'HTTP/[0-9.]+\s+([0-9]{3})'
+                - \1
+          timeout: '{$CIENA.MCP.HTTP.TIMEOUT}'
+          url: '{$CIENA.MCP.URL}/tron/api/v1/current-user'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$CIENA.MCP.TOKEN}'
+            - name: Accept
+              value: application/json
+          status_codes: ''
+          retrieve_mode: HEADERS
+          tags:
+            - tag: component
+              value: api
+          triggers:
+            - uuid: fc65fb3d86ff43558a798a397c3077d1
+              expression: 'last(/Ciena MCP by HTTP/ciena.mcp.api.status)=401'
+              name: 'Ciena MCP: API token rejected'
+              priority: HIGH
+              description: 'El MCP responde 401: el token {$CIENA.MCP.TOKEN} expiró o fue revocado. Todos los items de los NE dejan de actualizarse. Renovarlo con zabbix/ciena_mcp_token_refresh.py.'
+              tags:
+                - tag: scope
+                  value: security
+            - uuid: ec88f1d1e5bc41b4a7703737b2b597bc
+              expression: 'last(/Ciena MCP by HTTP/ciena.mcp.api.status)<>200 and last(/Ciena MCP by HTTP/ciena.mcp.api.status)<>401'
+              name: 'Ciena MCP: API returns unexpected HTTP status'
+              event_name: 'Ciena MCP: API returns HTTP {ITEM.LASTVALUE}'
+              priority: WARNING
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: aef1cb3456784b45b87fa5b39882c9af
+              expression: 'nodata(/Ciena MCP by HTTP/ciena.mcp.api.status,{$CIENA.MCP.NODATA.TIMEOUT})=1'
+              name: 'Ciena MCP: API unreachable'
+              priority: HIGH
+              description: 'No se pudo conectar a {$CIENA.MCP.URL} durante {$CIENA.MCP.NODATA.TIMEOUT}.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 1bba766856c442b0ba995d7146b83c06
+          name: 'MCP: Get network constructs'
+          type: HTTP_AGENT
+          key: ciena.mcp.nc.get
+          delay: '{$CIENA.NC.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'GET /nsi/api/v7/networkConstructs filtrado por {$CIENA.NC.TYPE} (limit=1000, sin paginar).'
+          timeout: '{$CIENA.MCP.HTTP.TIMEOUT}'
+          url: '{$CIENA.MCP.URL}/nsi/api/v7/networkConstructs'
+          query_fields:
+            - name: networkConstructType
+              value: '{$CIENA.NC.TYPE}'
+            - name: limit
+              value: '1000'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$CIENA.MCP.TOKEN}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: ca67c9f6080f487086d2a0b8d5914c9f
+          name: 'MCP: Network elements total'
+          type: DEPENDENT
+          key: ciena.mcp.ne.total
+          history: 90d
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.length()
+          master_item:
+            key: ciena.mcp.nc.get
+          tags:
+            - tag: component
+              value: network-constructs
+          triggers:
+            - uuid: 2ca823e879ff495a9c01230f019256bf
+              expression: 'change(/Ciena MCP by HTTP/ciena.mcp.ne.total)<0'
+              name: 'Ciena MCP: network elements removed from MCP'
+              event_name: 'Ciena MCP: network elements removed from MCP (now {ITEM.LASTVALUE})'
+              priority: INFO
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: 22c0e8ba9a964b73abab9dca6c865cab
+          name: 'MCP: Network elements not synchronized'
+          type: DEPENDENT
+          key: ciena.mcp.ne.not_synchronized
+          history: 90d
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.data[?(@.attributes.displayData.displaySyncState != ''synchronized'')].length()'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: ciena.mcp.nc.get
+          tags:
+            - tag: component
+              value: network-constructs
+        - uuid: 296023207e1349f3a6f3524d60ecc4cb
+          name: 'MCP: Network elements not connected'
+          type: DEPENDENT
+          key: ciena.mcp.ne.not_connected
+          history: 90d
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.data[?(@.attributes.displayData.displayAssociationState != ''Connected'')].length()'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: ciena.mcp.nc.get
+          tags:
+            - tag: component
+              value: network-constructs
+        - uuid: bd40c3dd392c42c4a1bfbd47adcc2d3c
+          name: 'MCP: Network elements with inventory out of sync'
+          type: DEPENDENT
+          key: ciena.mcp.ne.inventory_out_of_sync
+          history: 90d
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.data[?(@.attributes.inventoryOutOfSync == true)].length()'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: ciena.mcp.nc.get
+          tags:
+            - tag: component
+              value: network-constructs
+      discovery_rules:
+        - uuid: acf513bdc3df4010adece95b3608db0d
+          name: 'Network elements discovery'
+          type: DEPENDENT
+          key: ciena.mcp.ne.discovery
+          filter:
+            evaltype: FORMULA
+            formula: '(A or B) and C and D and E and F'
+            conditions:
+              - macro: '{#NE.NAME}'
+                value: '{$CIENA.NE.NAME.MATCHES}'
+                formulaid: A
+              - macro: '{#NE.DISPLAYNAME}'
+                value: '{$CIENA.NE.NAME.MATCHES}'
+                formulaid: B
+              - macro: '{#NE.NAME}'
+                value: '{$CIENA.NE.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: C
+              - macro: '{#NE.DISPLAYNAME}'
+                value: '{$CIENA.NE.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: D
+              - macro: '{#NE.IP}'
+                value: '{$CIENA.NE.IP.MATCHES}'
+                formulaid: E
+              - macro: '{#NE.SITE}'
+                value: '{$CIENA.NE.SITE.MATCHES}'
+                formulaid: F
+          description: |
+            Crea un host por cada network construct, vinculado a "Ciena MCP NE by HTTP".
+            Los filtros de nombre se aplican al name (el que usa PM) y al displayName (el de la UI del MCP).
+            Un cambio de filtro se aplica en la siguiente consulta ({$CIENA.NC.INTERVAL}).
+            Los hosts que dejan de cumplir el filtro se borran según el lifetime de la regla (7d por defecto).
+          host_prototypes:
+            - uuid: a759fe2179d843bba121903670c00544
+              host: 'ciena-{#NE.ID}'
+              name: '{#NE.DISPLAYNAME}'
+              group_links:
+                - group:
+                    name: 'Ciena/Network elements'
+              group_prototypes:
+                - name: 'Ciena/Sites/{#NE.SITE}'
+              templates:
+                - name: 'Ciena MCP NE by HTTP'
+              macros:
+                - macro: '{$CIENA.NE.ID}'
+                  value: '{#NE.ID}'
+                - macro: '{$CIENA.NE.NAME}'
+                  value: '{#NE.NAME}'
+              tags:
+                - tag: ciena.site
+                  value: '{#NE.SITE}'
+                - tag: ciena.type
+                  value: '{#NE.TYPE}'
+              inventory_mode: AUTOMATIC
+          master_item:
+            key: ciena.mcp.nc.get
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var r = JSON.parse(value);
+                  return JSON.stringify((r.data || []).map(function (nc) {
+                      var a = nc.attributes || {}, d = a.displayData || {};
+                      return {
+                          '{#NE.ID}': nc.id,
+                          '{#NE.NAME}': a.name || d.displayName || nc.id,
+                          '{#NE.DISPLAYNAME}': d.displayName || a.name || nc.id,
+                          '{#NE.IP}': a.ipAddress || d.displayIpAddress || '',
+                          '{#NE.SITE}': a.siteName || 'Unknown',
+                          '{#NE.TYPE}': a.resourceType || ''
+                      };
+                  }));
+      tags:
+        - tag: class
+          value: network
+        - tag: target
+          value: ciena
+      macros:
+        - macro: '{$CIENA.MCP.HTTP.TIMEOUT}'
+          value: 30s
+          description: 'Timeout de las llamadas HTTP al MCP.'
+        - macro: '{$CIENA.MCP.NODATA.TIMEOUT}'
+          value: 10m
+          description: 'Tiempo sin respuesta de la API antes de alertar.'
+        - macro: '{$CIENA.NC.INTERVAL}'
+          value: 5m
+          description: 'Intervalo de consulta de network constructs (y de descubrimiento de NEs).'
+        - macro: '{$CIENA.NC.TYPE}'
+          value: networkElement
+          description: 'networkConstructType a consultar/descubrir.'
+        - macro: '{$CIENA.NE.IP.MATCHES}'
+          value: '.*'
+          description: 'Regex: descubrir solo NEs cuya IP coincida, p.ej. ^172\.21\.'
+        - macro: '{$CIENA.NE.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex sobre name o displayName del NE. Para probar con un solo NE: ^NOMBRE$. Vacío o .* = todos.'
+        - macro: '{$CIENA.NE.NAME.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Regex sobre name o displayName: excluir NEs que coincidan.'
+        - macro: '{$CIENA.NE.SITE.MATCHES}'
+          value: '.*'
+          description: 'Regex: descubrir solo NEs de los sitios que coincidan.'
