@@ -78,6 +78,18 @@ class MCPAuth:
         self._expires_at = time.time() + timeout
         self._save_cached_token()
 
+    def invalidate(self):
+        """Descarta el token (memoria y disco) para forzar un login nuevo.
+
+        El servidor puede revocar la sesión antes de expires_at (idle timeout,
+        logout desde otra sesión, reinicio); sin borrar el cache en disco,
+        get_token() volvería a cargar el mismo token rechazado.
+        """
+        self._token = None
+        self._expires_at = None
+        if TOKEN_CACHE_PATH.exists():
+            TOKEN_CACHE_PATH.unlink()
+
     def logout(self):
         if self._token is None:
             return

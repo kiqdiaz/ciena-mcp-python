@@ -5,14 +5,27 @@ class NSIService:
         self.client = client
 
     def _get_all_pages(self, path, params=None):
-        """La API pagina resultados (default limit=30, links.next para seguir)."""
+        """La API pagina resultados (default limit=30, links.next para seguir).
+
+        El cursor de paginación a veces solapa el último item de una página con
+        el primero de la siguiente, duplicándolo; se deduplica por id preservando
+        el orden de llegada.
+        """
+        seen_ids = set()
         results = []
+
+        def add_page(items):
+            for item in items:
+                if item["id"] not in seen_ids:
+                    seen_ids.add(item["id"])
+                    results.append(item)
+
         resp = self.client.get(path, params=params)
-        results.extend(resp["data"])
+        add_page(resp["data"])
         next_url = resp.get("links", {}).get("next")
         while next_url:
             resp = self.client.get(next_url)
-            results.extend(resp["data"])
+            add_page(resp["data"])
             next_url = resp.get("links", {}).get("next")
         return results
 

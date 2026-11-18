@@ -5,3 +5,14 @@ __pycache__/
 *.pyc
 .claude/
 .ipynb_checkpoints/
+*.txt
+.mcp_zabbix_token_state.json
+
+# capturas: pueden contener datos del MCP y claves TLS
+*.pcap
+*.pcapng
+*.keys
+
+# salidas de ciena_trace_port.py: contienen datos reales de la red
+trace_*.html
+trace_*.mmd

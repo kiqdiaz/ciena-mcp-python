@@ -35,8 +35,7 @@ class MCPClient:
         resp = requests.request(method, url, headers=headers, verify=self.verify_ssl, timeout=30, **kwargs)
 
         if resp.status_code == 401 and retry_on_401:
-            self.auth._token = None
-            self.auth._expires_at = None
+            self.auth.invalidate()
             return self.request(method, path, retry_on_401=False, **kwargs)
 
         resp.raise_for_status()
